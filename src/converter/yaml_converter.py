@@ -40,12 +40,14 @@ class MoELayer:
             self.gemm2_comm2 = gemm2_comm2
 
             # chakra nodes
+            self.dispatch_comm_node = None
             self.gemm1_comm1_node = None
             self.gemm1_comp_node = None
             self.gemm1_comm2_node = None
             self.gemm2_comm1_node = None
             self.gemm2_comp_node = None
             self.gemm2_comm2_node = None
+            self.combine_comm_node = None
         except Exception:
             raise ValueError(f'Cannot parse the following layer -- "{line}"')
 
@@ -222,45 +224,60 @@ class YamlConverter:
 
                 # forward pass
                 for idx, layer in enumerate(layers):
+                    npu_tokens = layer.tokens[npu_id]
+                    tot_tokens = sum(layer.tokens)
+                    avg_tokens = tot_tokens // self.num_npus
                     last_node = None
 
+                    layer.dispatch_comm_node = self.get_comm_coll_node(f'Layer{idx}_DISPATCH', 'ALLTOALL', npu_tokens * layer.hidden)
+                    last_node = layer.dispatch_comm_node
+                    encode_message(g, layer.dispatch_comm_node)
+
                     if layer.gemm1_comm1 is not None:
-                        layer.gemm1_comm1_node = self.get_comm_coll_node(f'Layer{idx}_GEMM1_COMM1', layer.gemm1_comm1, layer.hidden)
+                        layer.gemm1_comm1_node = self.get_comm_coll_node(f'Layer{idx}_GEMM1_COMM1', layer.gemm1_comm1, tot_tokens * layer.hidden)
+                        if last_node is not None:
+                            self.add_parent(layer.gemm1_comm1_node, last_node)
                         last_node = layer.gemm1_comm1_node
                         encode_message(g, layer.gemm1_comm1_node)
                     
-                    layer.gemm1_comp_node = self.get_comp_node(f'Layer{idx}_GEMM1', layer.tokens[npu_id], layer.hidden, layer.expert_hidden)
+                    layer.gemm1_comp_node = self.get_comp_node(f'Layer{idx}_GEMM1', avg_tokens, layer.hidden, layer.expert_hidden)
                     if last_node is not None:
                         self.add_parent(layer.gemm1_comp_node, last_node)
                     last_node = layer.gemm1_comp_node
                     encode_message(g, layer.gemm1_comp_node)
                     
                     if layer.gemm1_comm2 is not None:
-                        layer.gemm1_comm2_node = self.get_comm_coll_node(f'Layer{idx}_GEMM1_COMM2', layer.gemm1_comm2, layer.expert_hidden)
+                        layer.gemm1_comm2_node = self.get_comm_coll_node(f'Layer{idx}_GEMM1_COMM2', layer.gemm1_comm2, tot_tokens * layer.expert_hidden)
                         if last_node is not None:
                             self.add_parent(layer.gemm1_comm2_node, last_node)
                         last_node = layer.gemm1_comm2_node
                         encode_message(g, layer.gemm1_comm2_node)
                     
                     if layer.gemm2_comm1 is not None:
-                        layer.gemm2_comm1_node = self.get_comm_coll_node(f'Layer{idx}_GEMM2_COMM1', layer.gemm2_comm1, layer.expert_hidden)
+                        layer.gemm2_comm1_node = self.get_comm_coll_node(f'Layer{idx}_GEMM2_COMM1', layer.gemm2_comm1, tot_tokens * layer.expert_hidden)
                         if last_node is not None:
                             self.add_parent(layer.gemm2_comm1_node, last_node)
                         last_node = layer.gemm2_comm1_node
                         encode_message(g, layer.gemm2_comm1_node)
                     
-                    layer.gemm2_comp_node = self.get_comp_node(f'Layer{idx}_GEMM2', layer.tokens[npu_id], layer.expert_hidden, layer.hidden)
+                    layer.gemm2_comp_node = self.get_comp_node(f'Layer{idx}_GEMM2', avg_tokens, layer.expert_hidden, layer.hidden)
                     if last_node is not None:
                         self.add_parent(layer.gemm2_comp_node, last_node)
                     last_node = layer.gemm2_comp_node
                     encode_message(g, layer.gemm2_comp_node)
                     
                     if layer.gemm2_comm2 is not None:
-                        layer.gemm2_comm2_node = self.get_comm_coll_node(f'Layer{idx}_GEMM2_COMM2', layer.gemm2_comm2, layer.hidden)
+                        layer.gemm2_comm2_node = self.get_comm_coll_node(f'Layer{idx}_GEMM2_COMM2', layer.gemm2_comm2, tot_tokens * layer.hidden)
                         if last_node is not None:
                             self.add_parent(layer.gemm2_comm2_node, last_node)
                         last_node = layer.gemm2_comm2_node
-                        encode_message(g, layer.gemm2_comm2_node)                    
+                        encode_message(g, layer.gemm2_comm2_node)
+
+                    layer.combine_comm_node = self.get_comm_coll_node(f'Layer{idx}_COMBINE', 'ALLTOALL', npu_tokens * layer.hidden)
+                    if last_node is not None:
+                            self.add_parent(layer.combine_comm_node, last_node)
+                    last_node = layer.combine_comm_node
+                    encode_message(g, layer.combine_comm_node)    
 
     def convert_hybrid_data_model(self, f: TextIOWrapper, num_layers: int) -> None:
         layers = self.get_layers(f, num_layers)
