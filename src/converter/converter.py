@@ -3,6 +3,7 @@ import logging
 
 from .pytorch_converter import PyTorchConverter
 from .text_converter import TextConverter
+from .yaml_converter import YamlConverter
 
 
 def setup_logging(log_filename: str) -> None:
@@ -34,6 +35,12 @@ def convert_pytorch(args: argparse.Namespace) -> None:
     """Convert PyTorch input trace to Chakra execution trace."""
     converter = PyTorchConverter()
     converter.convert(args.input, args.output, args.simulate)
+
+
+def convert_yaml(args: argparse.Namespace) -> None:
+    """Convert yaml input trace to Chakra execution trace."""
+    converter = YamlConverter(args.input, args.output, args.num_npus)
+    converter.convert()
 
 
 def main() -> None:
@@ -105,6 +112,29 @@ def main() -> None:
         ),
     )
     text_parser.set_defaults(func=convert_text)
+
+    yaml_parser = subparsers.add_parser(
+        "Yaml", help="Convert yaml-based model description to Chakra schema-based traces in the protobuf format"
+    )
+    yaml_parser.add_argument(
+        "--input",
+        type=str,
+        required=True,
+        help=(
+            "Input file in the yaml format that describes a model. This follows the text format used in ASTRA-sim: "
+            "https://github.com/astra-sim/astra-sim"
+        ),
+    )
+    yaml_parser.add_argument(
+        "--output", type=str, required=True, help="Output Chakra execution trace filename in the protobuf format"
+    )
+    yaml_parser.add_argument(
+        "--num-npus",
+        type=int,
+        required=True,
+        help="Number of NPUs in a system. Determines the number of traces the converter generates",
+    )
+    yaml_parser.set_defaults(func=convert_yaml)
 
     args = parser.parse_args()
 
