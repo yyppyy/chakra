@@ -40,6 +40,8 @@ ETFeederNode::ETFeederNode(std::shared_ptr<ChakraProtoMsg::Node> node) {
       this->part_y_ = static_cast<int>(attr.int32_val());
     } else if (attr_name == "inter_partition") {
       this->inter_part_ = static_cast<bool>(attr.bool_val());
+    } else if (attr_name == "") {
+      
     } else {
       this->other_attrs_.emplace(attr_name, attr);
     }

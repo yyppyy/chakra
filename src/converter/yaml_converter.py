@@ -36,6 +36,8 @@ class MoELayer:
         gemm2_comm2,
         mesh_x,
         mesh_y,
+        alltoall_dispatch_matrix,
+        alltoall_combine_matrix,
     ) -> None:
         try:
             self.tokens = tokens
@@ -70,6 +72,9 @@ class MoELayer:
             assert mesh_x % k_x == 0 and mesh_y % k_y == 0
             self.gemm2_part_x = mesh_x // k_x
             self.gemm2_part_y = mesh_y // k_y
+
+            self.alltoall_dispatch_matrix = alltoall_dispatch_matrix
+            self.alltoall_combine_matrix = alltoall_combine_matrix
 
             # chakra nodes
             self.dispatch_comm_node = None
@@ -112,16 +117,19 @@ class YamlConverter:
 
     def get_layers(self, f: TextIOWrapper, num_layers: int) -> List[MoELayer]:
         # hardcoded for now
+        npu_count = 16
         layer = MoELayer(
-            tokens = [1, 1, 1, 1, 1, 1, 1, 1],
+            tokens = [1 for _ in range(npu_count)],
             hidden = 7168,
             expert_hidden = 2048,
             gemm1_comm1 = "ALLGATHER",
             gemm1_comm2 = None,
             gemm2_comm1 = None,
             gemm2_comm2 = "REDUCESCATTER",
-            mesh_x = 32,
-            mesh_y = 32,
+            mesh_x = 4,
+            mesh_y = 4,
+            alltoall_combine_matrix = [[1 for _ in range(npu_count)] for _ in range(npu_count)],
+            alltoall_dispatch_matrix = [[1 for _ in range(npu_count)] for _ in range(npu_count)],
         )
         layers = [layer, ]
         return layers
@@ -152,13 +160,29 @@ class YamlConverter:
             return REDUCE_SCATTER
         return 0
 
-    def get_comm_coll_node(self, name: str, comm_type: str, comm_size: int, part_x: int, part_y: int, inter_part: bool) -> Any:
+    def get_comm_coll_node(
+        self,
+        name: str,
+        comm_type: str,
+        comm_size: int,
+        part_x: int = None,
+        part_y: int = None,
+        inter_part: bool = None,
+        alltoall_matrix: List[List[int]] = None) -> Any:
+
         node = self.get_node(f"COMM_COLL_NODE_{name}_{comm_type}", COMM_COLL_NODE)
         node.attr.append(ChakraAttr(name="comm_type", int64_val=self.get_comm_type(comm_type)))
         node.attr.append(ChakraAttr(name="comm_size", int64_val=comm_size))
         node.attr.append(ChakraAttr(name="partition_x", int32_val=part_x))
         node.attr.append(ChakraAttr(name="partition_y", int32_val=part_y))
         node.attr.append(ChakraAttr(name="inter_partition", bool_val=inter_part))
+        
+        if alltoall_matrix is not None:
+            flat = [t for sublist in alltoall_matrix for t in sublist]
+            a = ChakraAttr(name=f"alltoall_matrix")
+            a.int32_list.values.extend(flat)     # packed in proto3
+            node.attr.append(a)
+
         return node
 
     def add_parent(self, child_node: Any, parent_node: Any) -> None:
@@ -272,7 +296,8 @@ class YamlConverter:
                         npu_tokens * layer.hidden,
                         1,
                         1,
-                        True)
+                        True,
+                        layer.alltoall_dispatch_matrix)
                     last_node = layer.dispatch_comm_node
                     encode_message(g, layer.dispatch_comm_node)
 
@@ -346,7 +371,8 @@ class YamlConverter:
                         npu_tokens * layer.hidden,
                         1,
                         1,
-                        True)
+                        True,
+                        layer.alltoall_combine_matrix)
                     if last_node is not None:
                             self.add_parent(layer.combine_comm_node, last_node)
                     last_node = layer.combine_comm_node
