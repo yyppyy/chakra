@@ -34,6 +34,12 @@ ETFeederNode::ETFeederNode(std::shared_ptr<ChakraProtoMsg::Node> node) {
       this->comm_tag_ = static_cast<uint32_t>(attr.int32_val());
     } else if (attr_name == "pg_name") {
       this->pg_name_ = static_cast<string>(attr.string_val());
+    } else if (attr_name == "partition_x") {
+      this->part_x_ = static_cast<int>(attr.int32_val());
+    } else if (attr_name == "partition_y") {
+      this->part_y_ = static_cast<int>(attr.int32_val());
+    } else if (attr_name == "inter_partition") {
+      this->inter_part_ = static_cast<bool>(attr.bool_val());
     } else {
       this->other_attrs_.emplace(attr_name, attr);
     }
@@ -143,4 +149,16 @@ uint32_t ETFeederNode::comm_tag() {
 
 string ETFeederNode::pg_name() {
   return pg_name_;
+}
+
+int part_x() {
+  return part_x_;
+}
+
+int part_y() {
+  return part_y_;
+}
+
+bool inter_part() {
+  return inter_part_;
 }

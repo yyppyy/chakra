@@ -3,6 +3,7 @@
 import logging
 from io import TextIOWrapper
 from typing import Any, List
+import math
 
 from ...schema.protobuf.et_def_pb2 import (
     ALL_GATHER,
@@ -19,6 +20,10 @@ from ...schema.protobuf.et_def_pb2 import (
 from ..third_party.utils.protolib import encodeMessage as encode_message
 
 
+def closest_divisor(n: int, x: float) -> int:
+    divisors = [d for d in range(1, n + 1) if n % d == 0]
+    return min(divisors, key=lambda d: abs(d - x))
+
 class MoELayer:
     def __init__(
         self,
@@ -29,6 +34,8 @@ class MoELayer:
         gemm1_comm2,
         gemm2_comm1,
         gemm2_comm2,
+        mesh_x,
+        mesh_y,
     ) -> None:
         try:
             self.tokens = tokens
@@ -38,6 +45,31 @@ class MoELayer:
             self.gemm1_comm2 = gemm1_comm2
             self.gemm2_comm1 = gemm2_comm1
             self.gemm2_comm2 = gemm2_comm2
+                    
+            len_flat = mesh_x * mesh_y
+            k_x, k_y = 0, 0
+
+            gemm1_k_para_flat = closest_divisor(len_flat, (hidden * len_flat / expert_hidden) ** (1/2))
+            # decompose k_para_flat into x and y
+            for k_x in range(1, mesh_x + 1):
+                if (gemm1_k_para_flat % k_x == 0) and (mesh_x % k_x == 0):
+                    k_y = gemm1_k_para_flat // k_x
+                    if mesh_y % k_y == 0:
+                        break
+            assert mesh_x % k_x == 0 and mesh_y % k_y == 0
+            self.gemm1_part_x = mesh_x // k_x
+            self.gemm1_part_y = mesh_y // k_y
+
+            gemm2_k_para_flat = closest_divisor(len_flat, (expert_hidden * len_flat / hidden) ** (1/2))
+            # decompose k_para_flat into x and y
+            for k_x in range(1, mesh_x + 1):
+                if (gemm2_k_para_flat % k_x == 0) and (mesh_x % k_x == 0):
+                    k_y = gemm2_k_para_flat // k_x
+                    if mesh_y % k_y == 0:
+                        break
+            assert mesh_x % k_x == 0 and mesh_y % k_y == 0
+            self.gemm2_part_x = mesh_x // k_x
+            self.gemm2_part_y = mesh_y // k_y
 
             # chakra nodes
             self.dispatch_comm_node = None
@@ -88,6 +120,8 @@ class YamlConverter:
             gemm1_comm2 = None,
             gemm2_comm1 = None,
             gemm2_comm2 = "REDUCESCATTER",
+            mesh_x = 32,
+            mesh_y = 32,
         )
         layers = [layer, ]
         return layers
@@ -118,10 +152,13 @@ class YamlConverter:
             return REDUCE_SCATTER
         return 0
 
-    def get_comm_coll_node(self, name: str, comm_type: str, comm_size: int) -> Any:
+    def get_comm_coll_node(self, name: str, comm_type: str, comm_size: int, part_x: int, part_y: int, inter_part: bool) -> Any:
         node = self.get_node(f"COMM_COLL_NODE_{name}_{comm_type}", COMM_COLL_NODE)
         node.attr.append(ChakraAttr(name="comm_type", int64_val=self.get_comm_type(comm_type)))
         node.attr.append(ChakraAttr(name="comm_size", int64_val=comm_size))
+        node.attr.append(ChakraAttr(name="partition_x", int32_val=part_x))
+        node.attr.append(ChakraAttr(name="partition_y", int32_val=part_y))
+        node.attr.append(ChakraAttr(name="inter_partition", bool_val=inter_part))
         return node
 
     def add_parent(self, child_node: Any, parent_node: Any) -> None:
@@ -229,12 +266,24 @@ class YamlConverter:
                     avg_tokens = tot_tokens // self.num_npus
                     last_node = None
 
-                    layer.dispatch_comm_node = self.get_comm_coll_node(f'Layer{idx}_DISPATCH', 'ALLTOALL', npu_tokens * layer.hidden)
+                    layer.dispatch_comm_node = self.get_comm_coll_node(
+                        f'Layer{idx}_DISPATCH',
+                        'ALLTOALL',
+                        npu_tokens * layer.hidden,
+                        1,
+                        1,
+                        True)
                     last_node = layer.dispatch_comm_node
                     encode_message(g, layer.dispatch_comm_node)
 
                     if layer.gemm1_comm1 is not None:
-                        layer.gemm1_comm1_node = self.get_comm_coll_node(f'Layer{idx}_GEMM1_COMM1', layer.gemm1_comm1, tot_tokens * layer.hidden)
+                        layer.gemm1_comm1_node = self.get_comm_coll_node(
+                            f'Layer{idx}_GEMM1_COMM1',
+                            layer.gemm1_comm1,
+                            tot_tokens * layer.hidden,
+                            layer.gemm1_part_x,
+                            layer.gemm1_part_y,
+                            False)
                         if last_node is not None:
                             self.add_parent(layer.gemm1_comm1_node, last_node)
                         last_node = layer.gemm1_comm1_node
@@ -247,14 +296,26 @@ class YamlConverter:
                     encode_message(g, layer.gemm1_comp_node)
                     
                     if layer.gemm1_comm2 is not None:
-                        layer.gemm1_comm2_node = self.get_comm_coll_node(f'Layer{idx}_GEMM1_COMM2', layer.gemm1_comm2, tot_tokens * layer.expert_hidden)
+                        layer.gemm1_comm2_node = self.get_comm_coll_node(
+                            f'Layer{idx}_GEMM1_COMM2',
+                            layer.gemm1_comm2,
+                            tot_tokens * layer.expert_hidden,
+                            layer.gemm1_part_x,
+                            layer.gemm1_part_y,
+                            True)
                         if last_node is not None:
                             self.add_parent(layer.gemm1_comm2_node, last_node)
                         last_node = layer.gemm1_comm2_node
                         encode_message(g, layer.gemm1_comm2_node)
                     
                     if layer.gemm2_comm1 is not None:
-                        layer.gemm2_comm1_node = self.get_comm_coll_node(f'Layer{idx}_GEMM2_COMM1', layer.gemm2_comm1, tot_tokens * layer.expert_hidden)
+                        layer.gemm2_comm1_node = self.get_comm_coll_node(
+                            f'Layer{idx}_GEMM2_COMM1',
+                            layer.gemm2_comm1,
+                            tot_tokens * layer.expert_hidden,
+                            layer.gemm2_part_x,
+                            layer.gemm2_part_y,
+                            False)
                         if last_node is not None:
                             self.add_parent(layer.gemm2_comm1_node, last_node)
                         last_node = layer.gemm2_comm1_node
@@ -267,13 +328,25 @@ class YamlConverter:
                     encode_message(g, layer.gemm2_comp_node)
                     
                     if layer.gemm2_comm2 is not None:
-                        layer.gemm2_comm2_node = self.get_comm_coll_node(f'Layer{idx}_GEMM2_COMM2', layer.gemm2_comm2, tot_tokens * layer.hidden)
+                        layer.gemm2_comm2_node = self.get_comm_coll_node(
+                            f'Layer{idx}_GEMM2_COMM2',
+                            layer.gemm2_comm2,
+                            tot_tokens * layer.hidden,
+                            layer.gemm2_part_x,
+                            layer.gemm2_part_y,
+                            True)
                         if last_node is not None:
                             self.add_parent(layer.gemm2_comm2_node, last_node)
                         last_node = layer.gemm2_comm2_node
                         encode_message(g, layer.gemm2_comm2_node)
 
-                    layer.combine_comm_node = self.get_comm_coll_node(f'Layer{idx}_COMBINE', 'ALLTOALL', npu_tokens * layer.hidden)
+                    layer.combine_comm_node = self.get_comm_coll_node(
+                        f'Layer{idx}_COMBINE',
+                        'ALLTOALL',
+                        npu_tokens * layer.hidden,
+                        1,
+                        1,
+                        True)
                     if last_node is not None:
                             self.add_parent(layer.combine_comm_node, last_node)
                     last_node = layer.combine_comm_node
