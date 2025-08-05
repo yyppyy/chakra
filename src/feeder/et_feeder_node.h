@@ -43,6 +43,7 @@ class ETFeederNode {
   int part_x();
   int part_y();
   bool inter_part();
+  std::vector<std::pair<int, int>> alltoall_matrix();
 
  private:
   void assign_attr_val(
@@ -72,9 +73,11 @@ class ETFeederNode {
   uint32_t comm_tag_;
   std::string pg_name_;
 
-  int part_x_,
-  int part_y_,
-  int inter_part_,
+  int part_x_;
+  int part_y_;
+  int inter_part_;
+  std::vector<std::pair<int, int>> alltoall_send_matrix_;
+  std::vector<std::pair<int, int>> alltoall_recv_matrix_;
 };
 
 } // namespace Chakra

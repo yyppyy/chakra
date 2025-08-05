@@ -40,8 +40,24 @@ ETFeederNode::ETFeederNode(std::shared_ptr<ChakraProtoMsg::Node> node) {
       this->part_y_ = static_cast<int>(attr.int32_val());
     } else if (attr_name == "inter_partition") {
       this->inter_part_ = static_cast<bool>(attr.bool_val());
-    } else if (attr_name == "") {
-      
+    } else if (attr_name == "alltoall_send_matrix") {
+      const auto& alltoall_matrix_flat = attr.int32_list().values();
+      int len = alltoall_matrix_flat.size() / 2;
+      for (int i = 0; i < len; ++i) {
+        this->alltoall_send_matrix_.push_back(std::make_pair(
+          alltoall_matrix_flat[2 * i];
+          alltoall_matrix_flat[2 * i + 1];
+        ));
+      }
+    } else if (attr_name == "alltoall_recv_matrix") {
+      const auto& alltoall_matrix_flat = attr.int32_list().values();
+      int len = alltoall_matrix_flat.size() / 2;
+      for (int i = 0; i < len; ++i) {
+        this->alltoall_recv_matrix_.push_back(std::make_pair(
+          alltoall_matrix_flat[2 * i];
+          alltoall_matrix_flat[2 * i + 1];
+        ));
+      }
     } else {
       this->other_attrs_.emplace(attr_name, attr);
     }
@@ -163,4 +179,12 @@ int part_y() {
 
 bool inter_part() {
   return inter_part_;
+}
+
+std::vector<std::pair<int, int>> alltoall_send_matrix() {
+  return alltoall_send_matrix_;
+}
+
+std::vector<std::pair<int, int>> alltoall_recv_matrix() {
+  return alltoall_recv_matrix_;
 }

@@ -36,8 +36,7 @@ class MoELayer:
         gemm2_comm2,
         mesh_x,
         mesh_y,
-        alltoall_dispatch_matrix,
-        alltoall_combine_matrix,
+        alltoall_dispatch_send_matrix,
     ) -> None:
         try:
             self.tokens = tokens
@@ -73,8 +72,7 @@ class MoELayer:
             self.gemm2_part_x = mesh_x // k_x
             self.gemm2_part_y = mesh_y // k_y
 
-            self.alltoall_dispatch_matrix = alltoall_dispatch_matrix
-            self.alltoall_combine_matrix = alltoall_combine_matrix
+            self.alltoall_dispatch_send_matrix = alltoall_dispatch_send_matrix
 
             # chakra nodes
             self.dispatch_comm_node = None
@@ -87,6 +85,21 @@ class MoELayer:
             self.combine_comm_node = None
         except Exception:
             raise ValueError(f'Cannot parse the following layer -- "{line}"')
+    
+    def get_alltoall_matrix_by_npu(self, npu_id: int):
+        alltoall_dispatch_send_matrix = []
+        for dst, msg_size in enumerate(self.alltoall_dispatch_send_matrix[npu_id]):
+            if dst != npu_id and msg_size > 0:
+                alltoall_dispatch_send_matrix += [dst, msg_size]
+
+        alltoall_dispatch_recv_matrix = []
+        for src, msg_sizes in enumerate(self.alltoall_dispatch_send_matrix):
+            msg_size = msg_sizes[npu_id]
+            if src != npu_id and msg_size > 0:
+                alltoall_dispatch_recv_matrix += [src, msg_size]
+        
+        return (alltoall_dispatch_send_matrix, alltoall_dispatch_recv_matrix,
+                alltoall_dispatch_recv_matrix, alltoall_dispatch_send_matrix)
 
 
 class YamlConverter:
@@ -118,6 +131,7 @@ class YamlConverter:
     def get_layers(self, f: TextIOWrapper, num_layers: int) -> List[MoELayer]:
         # hardcoded for now
         npu_count = 16
+
         layer = MoELayer(
             tokens = [1 for _ in range(npu_count)],
             hidden = 7168,
@@ -128,9 +142,10 @@ class YamlConverter:
             gemm2_comm2 = "REDUCESCATTER",
             mesh_x = 4,
             mesh_y = 4,
-            alltoall_combine_matrix = [[1 for _ in range(npu_count)] for _ in range(npu_count)],
-            alltoall_dispatch_matrix = [[1 for _ in range(npu_count)] for _ in range(npu_count)],
+            alltoall_dispatch_send_matrix = [[1 if i != j else 0 for i in range(npu_count)]
+                                                                for j in range(npu_count)],
         )
+
         layers = [layer, ]
         return layers
 
@@ -168,7 +183,8 @@ class YamlConverter:
         part_x: int = None,
         part_y: int = None,
         inter_part: bool = None,
-        alltoall_matrix: List[List[int]] = None) -> Any:
+        alltoall_send_matrix: List = None,
+        alltoall_recv_matrix: List = None,) -> Any:
 
         node = self.get_node(f"COMM_COLL_NODE_{name}_{comm_type}", COMM_COLL_NODE)
         node.attr.append(ChakraAttr(name="comm_type", int64_val=self.get_comm_type(comm_type)))
@@ -177,11 +193,14 @@ class YamlConverter:
         node.attr.append(ChakraAttr(name="partition_y", int32_val=part_y))
         node.attr.append(ChakraAttr(name="inter_partition", bool_val=inter_part))
         
-        if alltoall_matrix is not None:
-            flat = [t for sublist in alltoall_matrix for t in sublist]
-            a = ChakraAttr(name=f"alltoall_matrix")
-            a.int32_list.values.extend(flat)     # packed in proto3
+        if alltoall_send_matrix is not None:
+            assert alltoall_recv_matrix is not None
+            a = ChakraAttr(name=f"alltoall_send_matrix")
+            a.int32_list.values.extend(alltoall_send_matrix)     # packed in proto3
             node.attr.append(a)
+            b = ChakraAttr(name=f"alltoall_recv_matrix")
+            b.int32_list.values.extend(alltoall_recv_matrix)     # packed in proto3
+            node.attr.append(b)
 
         return node
 
@@ -275,6 +294,7 @@ class YamlConverter:
     def convert_model_parallel(self, f: TextIOWrapper, num_layers: int) -> None:
         layers = self.get_layers(f, num_layers)
         for npu_id in range(self.num_npus):
+
             output_filename = "%s.%d.et" % (self.output_filename, npu_id)
             with open(output_filename, "wb") as g:
                 global_metadata = self.get_global_metadata()
@@ -285,6 +305,10 @@ class YamlConverter:
 
                 # forward pass
                 for idx, layer in enumerate(layers):
+                    
+                    alltoall_dispatch_send_matrix, alltoall_dispatch_recv_matrix,\
+                    alltoall_combine_send_matrix, alltoall_combine_recv_matrix = layer.get_alltoall_matrix_by_npu(npu_id)
+
                     npu_tokens = layer.tokens[npu_id]
                     tot_tokens = sum(layer.tokens)
                     avg_tokens = tot_tokens // self.num_npus
@@ -297,7 +321,8 @@ class YamlConverter:
                         1,
                         1,
                         True,
-                        layer.alltoall_dispatch_matrix)
+                        alltoall_dispatch_send_matrix,
+                        alltoall_dispatch_recv_matrix)
                     last_node = layer.dispatch_comm_node
                     encode_message(g, layer.dispatch_comm_node)
 
@@ -372,7 +397,8 @@ class YamlConverter:
                         1,
                         1,
                         True,
-                        layer.alltoall_combine_matrix)
+                        alltoall_combine_send_matrix,
+                        alltoall_combine_recv_matrix)
                     if last_node is not None:
                             self.add_parent(layer.combine_comm_node, last_node)
                     last_node = layer.combine_comm_node
