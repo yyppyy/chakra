@@ -45,8 +45,8 @@ ETFeederNode::ETFeederNode(std::shared_ptr<ChakraProtoMsg::Node> node) {
       int len = alltoall_matrix_flat.size() / 2;
       for (int i = 0; i < len; ++i) {
         this->alltoall_send_matrix_.push_back(std::make_pair(
-          alltoall_matrix_flat[2 * i];
-          alltoall_matrix_flat[2 * i + 1];
+          alltoall_matrix_flat[2 * i],
+          alltoall_matrix_flat[2 * i + 1]
         ));
       }
     } else if (attr_name == "alltoall_recv_matrix") {
@@ -54,8 +54,8 @@ ETFeederNode::ETFeederNode(std::shared_ptr<ChakraProtoMsg::Node> node) {
       int len = alltoall_matrix_flat.size() / 2;
       for (int i = 0; i < len; ++i) {
         this->alltoall_recv_matrix_.push_back(std::make_pair(
-          alltoall_matrix_flat[2 * i];
-          alltoall_matrix_flat[2 * i + 1];
+          alltoall_matrix_flat[2 * i],
+          alltoall_matrix_flat[2 * i + 1]
         ));
       }
     } else {
@@ -169,22 +169,22 @@ string ETFeederNode::pg_name() {
   return pg_name_;
 }
 
-int part_x() {
+int ETFeederNode::part_x() {
   return part_x_;
 }
 
-int part_y() {
+int ETFeederNode::part_y() {
   return part_y_;
 }
 
-bool inter_part() {
+bool ETFeederNode::inter_part() {
   return inter_part_;
 }
 
-std::vector<std::pair<int, int>> alltoall_send_matrix() {
+std::vector<std::pair<int, int>> ETFeederNode::alltoall_send_matrix() {
   return alltoall_send_matrix_;
 }
 
-std::vector<std::pair<int, int>> alltoall_recv_matrix() {
+std::vector<std::pair<int, int>> ETFeederNode::alltoall_recv_matrix() {
   return alltoall_recv_matrix_;
 }

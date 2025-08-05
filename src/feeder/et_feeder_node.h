@@ -43,7 +43,8 @@ class ETFeederNode {
   int part_x();
   int part_y();
   bool inter_part();
-  std::vector<std::pair<int, int>> alltoall_matrix();
+  std::vector<std::pair<int, int>> alltoall_send_matrix();
+  std::vector<std::pair<int, int>> alltoall_recv_matrix();
 
  private:
   void assign_attr_val(
