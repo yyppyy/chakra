@@ -40,6 +40,8 @@ class ETFeederNode {
   uint32_t comm_tag();
   std::string pg_name();
 
+  int group_x();
+  int group_y();
   int part_x();
   int part_y();
   bool inter_part();
@@ -74,6 +76,8 @@ class ETFeederNode {
   uint32_t comm_tag_;
   std::string pg_name_;
 
+  int group_x_;
+  int group_y_;
   int part_x_;
   int part_y_;
   int inter_part_;

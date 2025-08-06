@@ -4,6 +4,12 @@ import logging
 from io import TextIOWrapper
 from typing import Any, List
 import math
+import csv
+import ast
+from pathlib import Path
+from typing import Dict, Tuple, List
+
+import pandas as pd
 
 from ...schema.protobuf.et_def_pb2 import (
     ALL_GATHER,
@@ -24,6 +30,12 @@ def closest_divisor(n: int, x: float) -> int:
     divisors = [d for d in range(1, n + 1) if n % d == 0]
     return min(divisors, key=lambda d: abs(d - x))
 
+def squareish_groups_fast(mesh_x, mesh_y, G):
+    # aspect-weighted split
+    gx = max(1, int(round(math.sqrt(G * (mesh_x / mesh_y)))))
+    gy = math.ceil(G / gx)
+    return mesh_x // gx, mesh_y // gy
+
 class MoELayer:
     def __init__(
         self,
@@ -36,6 +48,8 @@ class MoELayer:
         gemm2_comm2,
         mesh_x,
         mesh_y,
+        group_x,
+        group_y,
         alltoall_dispatch_send_matrix,
     ) -> None:
         try:
@@ -47,32 +61,41 @@ class MoELayer:
             self.gemm2_comm1 = gemm2_comm1
             self.gemm2_comm2 = gemm2_comm2
                     
-            len_flat = mesh_x * mesh_y
+            len_flat = group_x * group_y
             k_x, k_y = 0, 0
 
             gemm1_k_para_flat = closest_divisor(len_flat, (hidden * len_flat / expert_hidden) ** (1/2))
-            # decompose k_para_flat into x and y
-            for k_x in range(1, mesh_x + 1):
-                if (gemm1_k_para_flat % k_x == 0) and (mesh_x % k_x == 0):
-                    k_y = gemm1_k_para_flat // k_x
-                    if mesh_y % k_y == 0:
-                        break
-            assert mesh_x % k_x == 0 and mesh_y % k_y == 0
-            self.gemm1_part_x = mesh_x // k_x
-            self.gemm1_part_y = mesh_y // k_y
+            # # decompose k_para_flat into x and y
+            # for k_x in range(1, group_x + 1):
+            #     if (gemm1_k_para_flat % k_x == 0) and (group_x % k_x == 0):
+            #         k_y = gemm1_k_para_flat // k_x
+            #         if group_y % k_y == 0:
+            #             break
+            # assert group_x % k_x == 0 and group_y % k_y == 0
+            # self.gemm1_part_x = group_x // k_x
+            # self.gemm1_part_y = group_y // k_y
+            self.gemm1_part_x, self.gemm1_part_y = squareish_groups_fast(group_x, group_y, gemm1_k_para_flat)
 
             gemm2_k_para_flat = closest_divisor(len_flat, (expert_hidden * len_flat / hidden) ** (1/2))
-            # decompose k_para_flat into x and y
-            for k_x in range(1, mesh_x + 1):
-                if (gemm2_k_para_flat % k_x == 0) and (mesh_x % k_x == 0):
-                    k_y = gemm2_k_para_flat // k_x
-                    if mesh_y % k_y == 0:
-                        break
-            assert mesh_x % k_x == 0 and mesh_y % k_y == 0
-            self.gemm2_part_x = mesh_x // k_x
-            self.gemm2_part_y = mesh_y // k_y
+            # # decompose k_para_flat into x and y
+            # for k_x in range(1, group_x + 1):
+            #     if (gemm2_k_para_flat % k_x == 0) and (group_x % k_x == 0):
+            #         k_y = gemm2_k_para_flat // k_x
+            #         if group_y % k_y == 0:
+            #             break
+            # assert group_x % k_x == 0 and group_y % k_y == 0
+            # self.gemm2_part_x = group_x // k_x
+            # self.gemm2_part_y = group_y // k_y
+            self.gemm2_part_x, self.gemm2_part_y = squareish_groups_fast(group_x, group_y, gemm2_k_para_flat)
 
             self.alltoall_dispatch_send_matrix = alltoall_dispatch_send_matrix
+
+            self.mesh_x = mesh_x
+            self.mesh_y = mesh_y
+            self.group_x = group_x
+            self.group_y = group_y
+
+            print(f'mesh({self.mesh_x},{self.mesh_y}), group({self.group_x},{self.group_y}), part1({self.gemm1_part_x},{self.gemm1_part_y}), part2({self.gemm2_part_x},{self.gemm2_part_y})')
 
             # chakra nodes
             self.dispatch_comm_node = None
@@ -100,6 +123,14 @@ class MoELayer:
         
         return (alltoall_dispatch_send_matrix, alltoall_dispatch_recv_matrix,
                 alltoall_dispatch_recv_matrix, alltoall_dispatch_send_matrix)
+    
+
+    def get_group_id_by_npu(self, npu_id: int):
+        i = npu_id // self.mesh_y
+        j = npu_id % self.mesh_y
+        group_i = i // self.group_x
+        group_j = j // self.group_y
+        return group_i * (self.mesh_y // self.group_y) + group_j
 
 
 class YamlConverter:
@@ -128,22 +159,107 @@ class YamlConverter:
     #         layers.append(Layer(line))
     #     return layers
 
-    def get_layers(self, f: TextIOWrapper, num_layers: int) -> List[MoELayer]:
-        # hardcoded for now
-        npu_count = 16
+    # def get_layers(self, f: TextIOWrapper, num_layers: int) -> List[MoELayer]:
+    #     # hardcoded for now
+    #     npu_count = 16
+
+    #     layer = MoELayer(
+    #         tokens = [1 for _ in range(npu_count)],
+    #         hidden = 7168,
+    #         expert_hidden = 2048,
+    #         gemm1_comm1 = "ALLGATHER",
+    #         gemm1_comm2 = None,
+    #         gemm2_comm1 = None,
+    #         gemm2_comm2 = "REDUCESCATTER",
+    #         mesh_x = 4,
+    #         mesh_y = 4,
+    #         alltoall_dispatch_send_matrix = [[1 if i != j else 0 for i in range(npu_count)]
+    #                                                             for j in range(npu_count)],
+    #     )
+
+    #     layers = [layer, ]
+    #     return layers
+
+    def get_layers(self, token_routing: List[int]) -> List[MoELayer]:
+        
+        # model and mesh configs hardcoded for now
+        npu_count = 1024
+        mesh_x, mesh_y = 32, 32
+        hidden = 7168
+        expert_hidden = 2046
+
+        # get edge npus
+        def edge_tile_ids_col_major(mesh_x: int, mesh_y: int):
+            """Edge tile ids for a mesh_x × mesh_y grid using column-major flattening:
+            id = x*mesh_y + y. Order: top row L→R, right col T→B (no corners),
+            bottom row R→L, left col B→T (no corners).
+            """
+            if mesh_x <= 0 or mesh_y <= 0:
+                return []
+
+            tid = lambda x, y: x * mesh_y + y
+            ids = []
+
+            # Top edge (y=0)
+            for x in range(mesh_x):
+                ids.append(tid(x, 0))
+
+            # Right edge (x=mesh_x-1), excluding corners
+            if mesh_x > 1 and mesh_y > 2:
+                for y in range(1, mesh_y - 1):
+                    ids.append(tid(mesh_x - 1, y))
+            elif mesh_x > 1 and mesh_y == 2:
+                # no middle points to add
+                pass
+
+            # Bottom edge (y=mesh_y-1), only if height >= 2
+            if mesh_y > 1:
+                for x in range(mesh_x - 1, -1, -1):
+                    ids.append(tid(x, mesh_y - 1))
+
+            # Left edge (x=0), excluding corners
+            if mesh_x > 1 and mesh_y > 2:
+                for y in range(mesh_y - 2, 0, -1):
+                    ids.append(tid(0, y))
+
+            return ids
+
+        edge_npu_ids = edge_tile_ids_col_major(mesh_x, mesh_y)
+
+        all_npu_ids = list(range(npu_count))
+
+        total_msg_size = sum(token_routing) * hidden
+        msg_size = total_msg_size // npu_count
+
+        alltoall_dispatch_send_matrix = [[0 for i in range(npu_count)] for j in range(npu_count)]
+
+        sender_npu_idx = 0
+        for recver_npu_id in range(npu_count):
+            sender_npu_id = edge_npu_ids[sender_npu_idx]
+            if sender_npu_id != recver_npu_id:
+                alltoall_dispatch_send_matrix[sender_npu_id][recver_npu_id] += msg_size
+            sender_npu_idx += 1
+            if sender_npu_idx == len(edge_npu_ids):
+                sender_npu_idx = 0
+
+        # todo: gemm is per ep group not global...
+        num_groups = len(token_routing)
+
+        group_x, group_y = squareish_groups_fast(mesh_x, mesh_y, num_groups)
 
         layer = MoELayer(
-            tokens = [1 for _ in range(npu_count)],
-            hidden = 7168,
-            expert_hidden = 2048,
+            tokens = token_routing,
+            hidden = hidden,
+            expert_hidden = expert_hidden,
             gemm1_comm1 = "ALLGATHER",
-            gemm1_comm2 = None,
-            gemm2_comm1 = None,
+            gemm1_comm2 = "REDUCESCATTER",
+            gemm2_comm1 = "ALLGATHER",
             gemm2_comm2 = "REDUCESCATTER",
-            mesh_x = 4,
-            mesh_y = 4,
-            alltoall_dispatch_send_matrix = [[1 if i != j else 0 for i in range(npu_count)]
-                                                                for j in range(npu_count)],
+            mesh_x = mesh_x,
+            mesh_y = mesh_y,
+            group_x = group_x,
+            group_y = group_y,
+            alltoall_dispatch_send_matrix = alltoall_dispatch_send_matrix,
         )
 
         layers = [layer, ]
@@ -157,11 +273,11 @@ class YamlConverter:
         node.type = node_type
         return node
 
-    def get_comp_node(self, name: str, dim1: int, dim2: int, dim3: int) -> Any:
+    def get_comp_node(self, name: str, ops: int, data_mov: int) -> Any:
         node = self.get_node("COMP_NODE_" + name, COMP_NODE)
         # node.duration_micros = comp_time
-        node.attr.append(ChakraAttr(name="num_ops", int64_val=dim1*dim2*dim3))
-        node.attr.append(ChakraAttr(name="tensor_size", int64_val=dim1*dim2*dim3)) # assume no register cache, so all weights/tokens need to be load from SRAM every time
+        node.attr.append(ChakraAttr(name="num_ops", int64_val=ops))
+        node.attr.append(ChakraAttr(name="tensor_size", int64_val=data_mov)) # assume no register cache, so all weights/tokens need to be load from SRAM every time
         return node
 
     def get_comm_type(self, comm_type: str) -> int:
@@ -180,6 +296,8 @@ class YamlConverter:
         name: str,
         comm_type: str,
         comm_size: int,
+        group_x: int = None,
+        group_y: int = None,
         part_x: int = None,
         part_y: int = None,
         inter_part: bool = None,
@@ -189,6 +307,8 @@ class YamlConverter:
         node = self.get_node(f"COMM_COLL_NODE_{name}_{comm_type}", COMM_COLL_NODE)
         node.attr.append(ChakraAttr(name="comm_type", int64_val=self.get_comm_type(comm_type)))
         node.attr.append(ChakraAttr(name="comm_size", int64_val=comm_size))
+        node.attr.append(ChakraAttr(name="group_x", int32_val=group_x))
+        node.attr.append(ChakraAttr(name="group_y", int32_val=group_y))
         node.attr.append(ChakraAttr(name="partition_x", int32_val=part_x))
         node.attr.append(ChakraAttr(name="partition_y", int32_val=part_y))
         node.attr.append(ChakraAttr(name="inter_partition", bool_val=inter_part))
@@ -208,26 +328,107 @@ class YamlConverter:
         child_node.data_deps.append(parent_node.id)
 
     def convert(self) -> None:
-        with open(self.input_filename, "r") as f:
-            first_line = f.readline().strip().split()
-            parallelism_type = first_line[0]
-            num_layers = int(f.readline().strip())
 
-            if parallelism_type == "MICRO":
-                self.convert_microbenchmark(f, num_layers)
-            elif parallelism_type == "DATA":
-                self.convert_data_parallel(f, num_layers)
-            elif parallelism_type == "MODEL":
-                self.convert_model_parallel(f, num_layers)
-            elif parallelism_type == "HYBRID_DATA_MODEL":
-                self.convert_hybrid_data_model(f, num_layers)
-            elif parallelism_type == "HYBRID_MODEL_DATA":
-                self.convert_hybrid_model_data(f, num_layers)
-            elif (parallelism_type == "HYBRID_DLRM") or (parallelism_type == "HYBRID_DLRM_ENHANCED"):
-                last_bottom_layer = int(first_line[1])
-                self.convert_hybrid_dlrm(f, num_layers, last_bottom_layer)
-            else:
-                raise ValueError(f"Unsupported parallelism type, {parallelism_type}")
+        # Columns defining a unique configuration combo
+        COMBO_COLS = [
+            "Layer",
+            "SRAM Capacity Factor",
+            "Batch Per Chip",
+            "Num Expert Groups",
+            "Expert Grouping",
+            "Expert Group Placement",
+            "TP Algo.",
+            "Token Routing Algo.",
+        ]
+
+        REQ_COL = "Request ID"
+        ROUTING_COL = "Token Routing"
+
+
+        def load_token_routing_by_combo(csv_path: Path) -> Dict[
+            Tuple, Dict[int, List[List[int]]]
+        ]:
+            """
+            Return:
+            {
+                (combo tuple): { request_id: token_routing_list_of_lists, ... },
+                ...
+            }
+            """
+            df = pd.read_csv(csv_path)
+
+            # Parse "Token Routing" strings into Python lists safely
+            def parse_routing(s: str):
+                if pd.isna(s):
+                    return []
+                s = s.strip()
+                # Some rows may be unquoted list (e.g., [[9]]), some quoted.
+                # ast.literal_eval can handle both.
+                try:
+                    val = ast.literal_eval(s)
+                except Exception:
+                    # Last-ditch: wrap in brackets if it's a flat number
+                    try:
+                        val = [[int(s)]]
+                    except Exception:
+                        val = []
+                return val
+
+            df[ROUTING_COL] = df[ROUTING_COL].apply(parse_routing)
+
+            result: Dict[Tuple, Dict[int, List[List[int]]]] = {}
+
+            for combo_vals, grp in df.groupby(COMBO_COLS, dropna=False):
+                # Ensure deterministic order by Request ID
+                grp = grp.sort_values(REQ_COL)
+                token_routings = [
+                    ast.literal_eval(s) if isinstance(s, str) else (s if isinstance(s, list) else [])
+                    for s in grp[ROUTING_COL].tolist()
+                ]
+                result[combo_vals] = token_routings
+
+            return result
+
+        # combos is a dict of list that maps each combo to list of token routing
+        combos = load_token_routing_by_combo(self.input_filename)
+
+        max_combo = 1
+        max_batch = 1
+
+        combo_cnt = 0
+        for combo in combos:
+            # print(combo, combos[combo])
+            # return
+            for batch_id, token_routing in enumerate(combos[combo][:max_batch]):
+                self.convert_model_parallel(
+                    batch_id,
+                    '_'.join(str(_) for _ in combo),
+                    [sum(t) for t in token_routing]
+                )
+            
+            combo_cnt += 1
+            if combo_cnt == max_combo:
+                break
+
+            # first_line = f.readline().strip().split()
+            # parallelism_type = first_line[0]
+            # num_layers = int(f.readline().strip())
+
+            # if parallelism_type == "MICRO":
+            #     self.convert_microbenchmark(f, num_layers)
+            # elif parallelism_type == "DATA":
+            #     self.convert_data_parallel(f, num_layers)
+            # elif parallelism_type == "MODEL":
+            #     self.convert_model_parallel(f, num_layers)
+            # elif parallelism_type == "HYBRID_DATA_MODEL":
+            #     self.convert_hybrid_data_model(f, num_layers)
+            # elif parallelism_type == "HYBRID_MODEL_DATA":
+            #     self.convert_hybrid_model_data(f, num_layers)
+            # elif (parallelism_type == "HYBRID_DLRM") or (parallelism_type == "HYBRID_DLRM_ENHANCED"):
+            #     last_bottom_layer = int(first_line[1])
+            #     self.convert_hybrid_dlrm(f, num_layers, last_bottom_layer)
+            # else:
+            #     raise ValueError(f"Unsupported parallelism type, {parallelism_type}")
 
     def convert_microbenchmark(self, f: TextIOWrapper, num_layers: int) -> None:
         layers = self.get_layers(f, num_layers)
@@ -291,8 +492,10 @@ class YamlConverter:
                 for layer in layers:
                     layer.bwd_wg_comm_node = None
 
-    def convert_model_parallel(self, f: TextIOWrapper, num_layers: int) -> None:
-        layers = self.get_layers(f, num_layers)
+    def convert_model_parallel(self, batch_id, combo, token_routing) -> None:
+
+        layers = self.get_layers(token_routing)
+
         for npu_id in range(self.num_npus):
 
             output_filename = "%s.%d.et" % (self.output_filename, npu_id)
@@ -309,15 +512,18 @@ class YamlConverter:
                     alltoall_dispatch_send_matrix, alltoall_dispatch_recv_matrix,\
                     alltoall_combine_send_matrix, alltoall_combine_recv_matrix = layer.get_alltoall_matrix_by_npu(npu_id)
 
-                    npu_tokens = layer.tokens[npu_id]
-                    tot_tokens = sum(layer.tokens)
-                    avg_tokens = tot_tokens // self.num_npus
+                    # npu_tokens = layer.tokens[npu_id]
+                    # tot_tokens = sum(layer.tokens)
+                    # avg_tokens = tot_tokens // self.num_npus
                     last_node = None
+                    group_id = layer.get_group_id_by_npu(npu_id)
 
                     layer.dispatch_comm_node = self.get_comm_coll_node(
                         f'Layer{idx}_DISPATCH',
                         'ALLTOALL',
-                        npu_tokens * layer.hidden,
+                        sum(layer.tokens) * layer.hidden,
+                        1,
+                        1,
                         1,
                         1,
                         True,
@@ -330,7 +536,9 @@ class YamlConverter:
                         layer.gemm1_comm1_node = self.get_comm_coll_node(
                             f'Layer{idx}_GEMM1_COMM1',
                             layer.gemm1_comm1,
-                            tot_tokens * layer.hidden,
+                            layer.tokens[group_id] * layer.hidden,
+                            layer.group_x,
+                            layer.group_y,
                             layer.gemm1_part_x,
                             layer.gemm1_part_y,
                             False)
@@ -339,7 +547,12 @@ class YamlConverter:
                         last_node = layer.gemm1_comm1_node
                         encode_message(g, layer.gemm1_comm1_node)
                     
-                    layer.gemm1_comp_node = self.get_comp_node(f'Layer{idx}_GEMM1', avg_tokens, layer.hidden, layer.expert_hidden)
+                    ops = layer.tokens[group_id] * layer.hidden * layer.expert_hidden // (layer.group_y * layer.group_y)
+                    layer.gemm1_comp_node = self.get_comp_node(
+                        f'Layer{idx}_GEMM1',
+                        ops,
+                        ops * 3, # 3 due to 3 operands per GEMM op
+                    )
                     if last_node is not None:
                         self.add_parent(layer.gemm1_comp_node, last_node)
                     last_node = layer.gemm1_comp_node
@@ -349,7 +562,9 @@ class YamlConverter:
                         layer.gemm1_comm2_node = self.get_comm_coll_node(
                             f'Layer{idx}_GEMM1_COMM2',
                             layer.gemm1_comm2,
-                            tot_tokens * layer.expert_hidden,
+                            layer.tokens[group_id] * layer.hidden,
+                            layer.group_x,
+                            layer.group_y,
                             layer.gemm1_part_x,
                             layer.gemm1_part_y,
                             True)
@@ -362,7 +577,9 @@ class YamlConverter:
                         layer.gemm2_comm1_node = self.get_comm_coll_node(
                             f'Layer{idx}_GEMM2_COMM1',
                             layer.gemm2_comm1,
-                            tot_tokens * layer.expert_hidden,
+                            layer.tokens[group_id] * layer.hidden,
+                            layer.group_x,
+                            layer.group_y,
                             layer.gemm2_part_x,
                             layer.gemm2_part_y,
                             False)
@@ -371,7 +588,12 @@ class YamlConverter:
                         last_node = layer.gemm2_comm1_node
                         encode_message(g, layer.gemm2_comm1_node)
                     
-                    layer.gemm2_comp_node = self.get_comp_node(f'Layer{idx}_GEMM2', avg_tokens, layer.expert_hidden, layer.hidden)
+                    ops = layer.tokens[group_id] * layer.hidden * layer.expert_hidden // (layer.group_y * layer.group_y)
+                    layer.gemm2_comp_node = self.get_comp_node(
+                        f'Layer{idx}_GEMM2',
+                        ops,
+                        ops * 3,
+                    )
                     if last_node is not None:
                         self.add_parent(layer.gemm2_comp_node, last_node)
                     last_node = layer.gemm2_comp_node
@@ -381,7 +603,9 @@ class YamlConverter:
                         layer.gemm2_comm2_node = self.get_comm_coll_node(
                             f'Layer{idx}_GEMM2_COMM2',
                             layer.gemm2_comm2,
-                            tot_tokens * layer.hidden,
+                            layer.tokens[group_id] * layer.hidden,
+                            layer.group_x,
+                            layer.group_y,
                             layer.gemm2_part_x,
                             layer.gemm2_part_y,
                             True)
@@ -393,7 +617,9 @@ class YamlConverter:
                     layer.combine_comm_node = self.get_comm_coll_node(
                         f'Layer{idx}_COMBINE',
                         'ALLTOALL',
-                        npu_tokens * layer.hidden,
+                        sum(layer.tokens) * layer.hidden,
+                        1,
+                        1,
                         1,
                         1,
                         True,
