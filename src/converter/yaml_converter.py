@@ -180,11 +180,11 @@ class YamlConverter:
     #     layers = [layer, ]
     #     return layers
 
-    def get_layers(self, token_routing: List[int]) -> List[MoELayer]:
+    def get_layers(self, token_routing: List[int], npu_count: int) -> List[MoELayer]:
         
         # model and mesh configs hardcoded for now
-        npu_count = 1024
-        mesh_x, mesh_y = 32, 32
+        # fix me
+        mesh_x, mesh_y = 4, 4
         hidden = 7168
         expert_hidden = 2046
 
@@ -236,7 +236,7 @@ class YamlConverter:
         sender_npu_idx = 0
         for recver_npu_id in range(npu_count):
             sender_npu_id = edge_npu_ids[sender_npu_idx]
-            if sender_npu_id != recver_npu_id:
+            if sender_npu_id != recver_npu_id and sender_npu_id == 0: # remove me
                 alltoall_dispatch_send_matrix[sender_npu_id][recver_npu_id] += msg_size
             sender_npu_idx += 1
             if sender_npu_idx == len(edge_npu_ids):
@@ -315,10 +315,10 @@ class YamlConverter:
         
         if alltoall_send_matrix is not None:
             assert alltoall_recv_matrix is not None
-            a = ChakraAttr(name=f"alltoall_send_matrix")
+            a = ChakraAttr(name="alltoall_send_matrix")
             a.int32_list.values.extend(alltoall_send_matrix)     # packed in proto3
             node.attr.append(a)
-            b = ChakraAttr(name=f"alltoall_recv_matrix")
+            b = ChakraAttr(name="alltoall_recv_matrix")
             b.int32_list.values.extend(alltoall_recv_matrix)     # packed in proto3
             node.attr.append(b)
 
@@ -494,7 +494,10 @@ class YamlConverter:
 
     def convert_model_parallel(self, batch_id, combo, token_routing) -> None:
 
-        layers = self.get_layers(token_routing)
+        # fixme debug small number
+        self.num_npus = 16
+
+        layers = self.get_layers(token_routing, self.num_npus)
 
         for npu_id in range(self.num_npus):
 

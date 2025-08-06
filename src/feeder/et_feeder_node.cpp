@@ -10,6 +10,10 @@ ETFeederNode::ETFeederNode(std::shared_ptr<ChakraProtoMsg::Node> node) {
   this->runtime_ = node->duration_micros();
   this->is_cpu_op_ = 0;
 
+  // for (const auto& attr : node->attr()) {
+  //   std::cout << "Attr: " << attr.name() << std::endl;
+  // }
+
   for (const auto& attr : node->attr()) {
     const string& attr_name = attr.name();
 
@@ -47,11 +51,13 @@ ETFeederNode::ETFeederNode(std::shared_ptr<ChakraProtoMsg::Node> node) {
     } else if (attr_name == "alltoall_send_matrix") {
       const auto& alltoall_matrix_flat = attr.int32_list().values();
       int len = alltoall_matrix_flat.size() / 2;
+      // printf("%d\n", alltoall_matrix_flat.size());
       for (int i = 0; i < len; ++i) {
         this->alltoall_send_matrix_.push_back(std::make_pair(
           alltoall_matrix_flat[2 * i],
           alltoall_matrix_flat[2 * i + 1]
         ));
+        // printf("%d|%d, ", alltoall_matrix_flat[2 * i], alltoall_matrix_flat[2 * i + 1]);
       }
     } else if (attr_name == "alltoall_recv_matrix") {
       const auto& alltoall_matrix_flat = attr.int32_list().values();
