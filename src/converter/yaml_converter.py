@@ -30,10 +30,22 @@ def closest_divisor(n: int, x: float) -> int:
     divisors = [d for d in range(1, n + 1) if n % d == 0]
     return min(divisors, key=lambda d: abs(d - x))
 
+# def squareish_groups_fast(mesh_x, mesh_y, G):
+#     # aspect-weighted split
+#     gx = max(1, int(round(math.sqrt(G * (mesh_x / mesh_y)))))
+#     gy = math.ceil(G / gx)
+#     return mesh_x // gx, mesh_y // gy
+
 def squareish_groups_fast(mesh_x, mesh_y, G):
-    # aspect-weighted split
-    gx = max(1, int(round(math.sqrt(G * (mesh_x / mesh_y)))))
-    gy = math.ceil(G / gx)
+    # initial guess near the aspect-ratio-weighted optimum
+    gx = max(1, int(round(math.sqrt(G * mesh_x / mesh_y))))
+    # clamp to mesh_x if you have a hard limit
+    gx = min(gx, mesh_x)
+    # walk gx down until it divides G (or until gx == 1)
+    while gx > 1 and G % gx != 0:
+        gx -= 1
+    gy = G // gx            # now exact
+    # optional: ensure gy fits mesh_y; otherwise adjust in the other direction
     return mesh_x // gx, mesh_y // gy
 
 class MoELayer:
