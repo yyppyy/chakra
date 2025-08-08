@@ -48,6 +48,19 @@ def squareish_groups_fast(mesh_x, mesh_y, G):
     # optional: ensure gy fits mesh_y; otherwise adjust in the other direction
     return mesh_x // gx, mesh_y // gy
 
+def closest_factor_pair(n: int) -> Tuple[int, int]:
+    """
+    For n > 0, return (a, b) with a*b == n, a <= b, and |a-b| minimized.
+    If n is a perfect square, returns (sqrt(n), sqrt(n)).
+    """
+    if n <= 0:
+        raise ValueError("n must be a positive integer")
+
+    a = math.isqrt(n)          # floor(sqrt(n))
+    while n % a != 0:          # walk down until a divides n
+        a -= 1
+    return a, n // a
+
 class MoELayer:
     def __init__(
         self,
@@ -147,12 +160,13 @@ class MoELayer:
 
 class YamlConverter:
     def __init__(
-        self, input_filename: str, output_filename: str, num_npus: int
+        self, input_filename: str, output_filename: str, num_npus: int, batch_id: int,
     ) -> None:
         self.input_filename = input_filename
         self.output_filename = output_filename
         self.num_npus = num_npus
         self.next_node_id = 0
+        self.batch_id = batch_id
 
     def get_global_metadata(self):
         input_text = ""
@@ -196,7 +210,7 @@ class YamlConverter:
         
         # model and mesh configs hardcoded for now
         # fix me
-        mesh_x, mesh_y = 32, 32
+        mesh_x, mesh_y = closest_factor_pair(self.num_npus)
         hidden = 7168
         expert_hidden = 2046
 
@@ -404,23 +418,20 @@ class YamlConverter:
         # combos is a dict of list that maps each combo to list of token routing
         combos = load_token_routing_by_combo(self.input_filename)
 
-        max_combo = 1
-        max_batch = 1
+        combo_begin = 0
+        combo_end = 2
 
-        combo_cnt = 0
-        for combo in combos:
+        for combo in sorted(combos.keys())[combo_begin:combo_end]:
             # print(combo, combos[combo])
             # return
-            for batch_id, token_routing in enumerate(combos[combo][:max_batch]):
-                self.convert_model_parallel(
-                    batch_id,
-                    '_'.join(str(_) for _ in combo),
-                    [sum(t) for t in token_routing]
-                )
-            
-            combo_cnt += 1
-            if combo_cnt == max_combo:
-                break
+            # for batch_id, token_routing in enumerate(combos[combo][:max_batch]):
+
+            token_routing = combos[combo][self.batch_id]
+            self.convert_model_parallel(
+                self.batch_id,
+                '_'.join(str(_) for _ in combo),
+                [sum(t) for t in token_routing]
+            )
 
             # first_line = f.readline().strip().split()
             # parallelism_type = first_line[0]

@@ -39,7 +39,7 @@ def convert_pytorch(args: argparse.Namespace) -> None:
 
 def convert_yaml(args: argparse.Namespace) -> None:
     """Convert yaml input trace to Chakra execution trace."""
-    converter = YamlConverter(args.input, args.output, args.num_npus)
+    converter = YamlConverter(args.input, args.output, args.num_npus, args.batch_id)
     converter.convert()
 
 
@@ -133,6 +133,12 @@ def main() -> None:
         type=int,
         required=True,
         help="Number of NPUs in a system. Determines the number of traces the converter generates",
+    )
+    yaml_parser.add_argument(
+        "--batch-id",
+        type=int,
+        required=True,
+        help="The batch to generate",
     )
     yaml_parser.set_defaults(func=convert_yaml)
 
