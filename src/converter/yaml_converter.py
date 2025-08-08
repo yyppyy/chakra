@@ -196,7 +196,7 @@ class YamlConverter:
         
         # model and mesh configs hardcoded for now
         # fix me
-        mesh_x, mesh_y = 4, 4
+        mesh_x, mesh_y = 32, 32
         hidden = 7168
         expert_hidden = 2046
 
@@ -248,7 +248,7 @@ class YamlConverter:
         sender_npu_idx = 0
         for recver_npu_id in range(npu_count):
             sender_npu_id = edge_npu_ids[sender_npu_idx]
-            if sender_npu_id != recver_npu_id and sender_npu_id == 0: # remove me
+            if sender_npu_id != recver_npu_id:
                 alltoall_dispatch_send_matrix[sender_npu_id][recver_npu_id] += msg_size
             sender_npu_idx += 1
             if sender_npu_idx == len(edge_npu_ids):
@@ -507,7 +507,7 @@ class YamlConverter:
     def convert_model_parallel(self, batch_id, combo, token_routing) -> None:
 
         # fixme debug small number
-        self.num_npus = 16
+        # self.num_npus = 16
 
         layers = self.get_layers(token_routing, self.num_npus)
 
